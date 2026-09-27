@@ -1,7 +1,7 @@
 import { create } from 'zustand'
-import type { Comment, EditConflict, Paragraph, Reply, Role, Version } from '../types'
+import type { Arbitration, Comment, EditConflict, HistorySnapshot, Paragraph, Reply, Role, Version } from '../types'
 
-const DRAFT_KEY = 'sologsb-1002-draft-v1'
+const DRAFT_KEY = 'sologsb-1002-draft-v2'
 const id = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
 
 const baseParagraphs: Paragraph[] = [
@@ -20,33 +20,61 @@ const baseComments: Comment[] = [
   { id: 'c-04', paragraphId: 'p-04', author: '审稿人 C', role: 'reviewer', type: 'comment', quote: '两名研究者独立完成', body: '建议报告编码者间一致性系数，并明确不一致处理规则。', status: 'open', replies: [], createdAt: Date.now() - 48000000 },
   { id: 'c-05', paragraphId: 'p-05', author: '审稿人 D', role: 'reviewer', type: 'comment', quote: '邀请第三位研究者裁决', body: '与上一段重复：都在说明编码分歧如何解决，建议合并意见。', status: 'open', replies: [], createdAt: Date.now() - 43000000 },
   { id: 'c-06', paragraphId: 'p-06', author: '审稿人 B', role: 'reviewer', type: 'suggestion', quote: '但没有显著降低维护者处理复杂议题的认知负担', body: '“显著”需要给出统计检验与效应量。', suggestion: '初步结果显示，辅助工具缩短了首次响应时间，但对复杂议题处理时长与自我报告认知负担均未产生统计显著影响。', status: 'open', replies: [], createdAt: Date.now() - 36000000 },
+  { id: 'c-07', paragraphId: 'p-02', author: '审稿人 C', role: 'reviewer', type: 'suggestion', quote: '仍缺少系统证据', body: '与审稿人 A 的改法冲突：建议改为强调“缺乏可复现的纵向数据”，比泛泛的“系统证据”更准确。', suggestion: '近年来，大型语言模型被广泛用于代码生成与缺陷定位，但缺乏可复现的纵向数据支撑其在真实维护工作流中的效果评估。', status: 'open', replies: [], createdAt: Date.now() - 60000000 },
 ]
 const seed = typeof localStorage !== 'undefined' ? localStorage.getItem(DRAFT_KEY) : null
-const parsed = seed ? JSON.parse(seed) as Partial<{ paragraphs: Paragraph[]; comments: Comment[]; versions: Version[] }> : null
+const parsed = seed ? JSON.parse(seed) as Partial<{ paragraphs: Paragraph[]; comments: Comment[]; versions: Version[]; arbitrations: Arbitration[] }> : null
 const initialParagraphs = parsed?.paragraphs?.length ? parsed.paragraphs : baseParagraphs
 const initialComments = parsed?.comments ?? baseComments
+const initialArbitrations = parsed?.arbitrations ?? []
 const initialVersions: Version[] = parsed?.versions ?? [
   { id: 'v-01', label: '投稿初稿 v1', createdAt: Date.now() - 1209600000, paragraphs: JSON.parse(JSON.stringify(baseParagraphs)) as Paragraph[] },
   { id: 'v-02', label: '审阅基线 v2', createdAt: Date.now() - 172800000, paragraphs: JSON.parse(JSON.stringify(baseParagraphs.map((p) => p.id === 'p-04' ? { ...p, text: `${p.text} 编码规则在预注册方案中说明。` } : p))) as Paragraph[] },
 ]
 
-const persistDraft = (paragraphs: Paragraph[], comments: Comment[], versions: Version[]) => {
-  localStorage.setItem(DRAFT_KEY, JSON.stringify({ paragraphs, comments, versions }))
+const persistDraft = (paragraphs: Paragraph[], comments: Comment[], versions: Version[], arbitrations: Arbitration[]) => {
+  localStorage.setItem(DRAFT_KEY, JSON.stringify({ paragraphs, comments, versions, arbitrations }))
 }
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T
+
+export const isArbitrationStale = (arbitration: Arbitration, paragraphs: Paragraph[], comments: Comment[]): boolean => {
+  if (arbitration.status !== 'active') return false
+  const paragraph = paragraphs.find((item) => item.id === arbitration.paragraphId)
+  if (!paragraph || paragraph.text !== arbitration.baseText) return true
+  return arbitration.commentIds.some((commentId) => {
+    const comment = comments.find((item) => item.id === commentId)
+    const snapshot = arbitration.snapshots[commentId]
+    if (!comment || !snapshot) return true
+    return comment.quote !== snapshot.quote || (comment.suggestion ?? '') !== snapshot.suggestion
+  })
+}
+
+export const findCoveringArbitration = (arbitrations: Arbitration[], paragraphId: string, commentId: string): Arbitration | undefined =>
+  arbitrations
+    .filter((item) => item.paragraphId === paragraphId && item.status === 'active' && item.commentIds.includes(commentId))
+    .sort((a, b) => b.createdAt - a.createdAt)[0]
+
+interface ArbitrateInput {
+  paragraphId: string
+  commentIds: string[]
+  winnerCommentId: string | null
+  mergedText: string | null
+  rationale: string
+}
 
 interface ReviewState {
   role: Role
   paragraphs: Paragraph[]
   comments: Comment[]
   versions: Version[]
+  arbitrations: Arbitration[]
   selectedParagraphId: string
   commentFilter: 'all' | 'open' | 'suggestion' | 'duplicate'
   revisionMode: boolean
   dirty: boolean
   conflicts: EditConflict[]
-  past: { paragraphs: Paragraph[]; comments: Comment[]; versions: Version[] }[]
-  future: { paragraphs: Paragraph[]; comments: Comment[]; versions: Version[] }[]
+  past: HistorySnapshot[]
+  future: HistorySnapshot[]
   setRole: (role: Role) => void
   selectParagraph: (id: string) => void
   setCommentFilter: (filter: ReviewState['commentFilter']) => void
@@ -56,6 +84,8 @@ interface ReviewState {
   replyComment: (commentId: string, body: string) => void
   resolveSuggestion: (commentId: string, accepted: boolean) => void
   mergeComment: (commentId: string, targetId: string) => void
+  arbitrate: (input: ArbitrateInput) => string | null
+  applyArbitration: (arbitrationId: string, accepted: boolean) => string | null
   toggleLock: (paragraphId: string) => void
   createVersion: (label: string) => void
   addConflict: (conflict: EditConflict) => void
@@ -69,12 +99,13 @@ interface ReviewState {
 
 export const useReviewStore = create<ReviewState>((set, get) => {
   const record = (producer: (state: ReviewState) => Partial<ReviewState>) => set((state) => {
-    const history = { paragraphs: clone(state.paragraphs), comments: clone(state.comments), versions: clone(state.versions) }
+    const history: HistorySnapshot = { paragraphs: clone(state.paragraphs), comments: clone(state.comments), versions: clone(state.versions), arbitrations: clone(state.arbitrations) }
     const next = producer(state)
     const paragraphs = next.paragraphs ?? state.paragraphs
     const comments = next.comments ?? state.comments
     const versions = next.versions ?? state.versions
-    persistDraft(paragraphs, comments, versions)
+    const arbitrations = next.arbitrations ?? state.arbitrations
+    persistDraft(paragraphs, comments, versions, arbitrations)
     return { ...next, past: [...state.past.slice(-49), history], future: [], dirty: true }
   })
 
@@ -83,6 +114,7 @@ export const useReviewStore = create<ReviewState>((set, get) => {
     paragraphs: initialParagraphs,
     comments: initialComments,
     versions: initialVersions,
+    arbitrations: initialArbitrations,
     selectedParagraphId: 'p-02',
     commentFilter: 'all',
     revisionMode: false,
@@ -116,18 +148,85 @@ export const useReviewStore = create<ReviewState>((set, get) => {
         replies: [...comment.replies, { id: id('reply'), author: state.role === 'author' ? '作者' : state.role === 'reviewer' ? '审稿人 A' : '编辑', role: state.role, body, createdAt: Date.now() } as Reply],
       } : comment),
     })),
-    resolveSuggestion: (commentId, accepted) => record((state) => {
-      const comment = state.comments.find((item) => item.id === commentId)
-      return {
-        comments: state.comments.map((item) => item.id === commentId ? { ...item, status: accepted ? 'accepted' : 'rejected' } : item),
-        paragraphs: comment?.suggestion && accepted
-          ? state.paragraphs.map((paragraph) => paragraph.id === comment.paragraphId ? { ...paragraph, text: comment.suggestion as string, status: 'accepted' } : paragraph)
-          : state.paragraphs,
-      }
-    }),
-    mergeComment: (commentId, targetId) => record((state) => ({
-      comments: state.comments.map((comment) => comment.id === commentId ? { ...comment, status: 'merged', mergedInto: targetId } : comment),
-    })),
+    resolveSuggestion: (commentId, accepted) => {
+      const state = get()
+      const target = state.comments.find((item) => item.id === commentId)
+      if (target && findCoveringArbitration(state.arbitrations, target.paragraphId, commentId)) return
+      record((current) => {
+        const comment = current.comments.find((item) => item.id === commentId)
+        return {
+          comments: current.comments.map((item) => item.id === commentId ? { ...item, status: accepted ? 'accepted' : 'rejected' } : item),
+          paragraphs: comment?.suggestion && accepted
+            ? current.paragraphs.map((paragraph) => paragraph.id === comment.paragraphId ? { ...paragraph, text: comment.suggestion as string, status: 'accepted' } : paragraph)
+            : current.paragraphs,
+        }
+      })
+    },
+    mergeComment: (commentId, targetId) => {
+      const state = get()
+      const target = state.comments.find((item) => item.id === commentId)
+      if (target && findCoveringArbitration(state.arbitrations, target.paragraphId, commentId)) return
+      record((current) => ({
+        comments: current.comments.map((comment) => comment.id === commentId ? { ...comment, status: 'merged', mergedInto: targetId } : comment),
+      }))
+    },
+    arbitrate: (input) => {
+      const state = get()
+      const paragraph = state.paragraphs.find((item) => item.id === input.paragraphId)
+      if (!paragraph) return '段落不存在'
+      if (paragraph.status === 'locked') return '段落已锁定，裁决不能生效'
+      if (state.conflicts.some((item) => item.paragraphId === input.paragraphId)) return '该段落存在未处理的远端冲突，裁决不能生效'
+      if (!input.rationale.trim()) return '请填写裁决理由'
+      const candidates = state.comments.filter((item) => input.commentIds.includes(item.id)
+        && item.paragraphId === input.paragraphId && item.type === 'suggestion' && (item.status === 'open' || item.status === 'minority'))
+      if (candidates.length < 2) return '至少需要两条冲突的修改建议才能裁决'
+      if (input.winnerCommentId && !candidates.some((item) => item.id === input.winnerCommentId)) return '请选择一条有效的建议'
+      if (!input.winnerCommentId && !input.mergedText?.trim()) return '请填写合并后的推荐正文'
+      record((current) => ({
+        arbitrations: [{
+          id: id('arbitration'),
+          paragraphId: input.paragraphId,
+          commentIds: candidates.map((item) => item.id),
+          winnerCommentId: input.winnerCommentId,
+          mergedText: input.winnerCommentId ? null : input.mergedText?.trim() ?? null,
+          rationale: input.rationale.trim(),
+          status: 'active' as const,
+          baseText: paragraph.text,
+          snapshots: Object.fromEntries(candidates.map((item) => [item.id, { quote: item.quote, suggestion: item.suggestion ?? '' }])),
+          createdAt: Date.now(),
+        }, ...current.arbitrations.map((item) => item.paragraphId === input.paragraphId && item.status === 'active'
+          ? { ...item, status: 'superseded' as const, decidedAt: Date.now() }
+          : item)],
+        comments: current.comments.map((item) => candidates.some((candidate) => candidate.id === item.id)
+          ? { ...item, status: item.id === input.winnerCommentId ? 'open' as const : 'minority' as const }
+          : item),
+      }))
+      return null
+    },
+    applyArbitration: (arbitrationId, accepted) => {
+      const state = get()
+      const arbitration = state.arbitrations.find((item) => item.id === arbitrationId)
+      if (!arbitration || arbitration.status !== 'active') return '裁决不存在或已处理'
+      if (isArbitrationStale(arbitration, state.paragraphs, state.comments)) return '正文、建议内容或引用范围已变化，裁决已失效，请等待编辑重新仲裁'
+      const paragraph = state.paragraphs.find((item) => item.id === arbitration.paragraphId)
+      if (!paragraph) return '段落不存在'
+      if (paragraph.status === 'locked') return '段落已锁定，裁决不能生效'
+      if (state.conflicts.some((item) => item.paragraphId === arbitration.paragraphId)) return '该段落存在未处理的远端冲突，裁决不能生效'
+      const winner = arbitration.winnerCommentId ? state.comments.find((item) => item.id === arbitration.winnerCommentId) : null
+      const nextText = arbitration.mergedText ?? winner?.suggestion
+      record((current) => ({
+        arbitrations: current.arbitrations.map((item) => item.id === arbitrationId
+          ? { ...item, status: accepted ? 'applied' as const : 'rejected' as const, decidedAt: Date.now() }
+          : item),
+        comments: current.comments.map((item) => item.id === arbitration.winnerCommentId
+          ? { ...item, status: accepted ? 'accepted' as const : 'rejected' as const }
+          : item),
+        paragraphs: accepted && nextText
+          ? current.paragraphs.map((item) => item.id === arbitration.paragraphId ? { ...item, text: nextText, status: 'accepted' as const, highlighted: true } : item)
+          : current.paragraphs,
+      }))
+      return null
+    },
     toggleLock: (paragraphId) => record((state) => ({
       paragraphs: state.paragraphs.map((paragraph) => paragraph.id === paragraphId ? {
         ...paragraph,
@@ -151,25 +250,25 @@ export const useReviewStore = create<ReviewState>((set, get) => {
     undo: () => set((state) => {
       const previous = state.past.at(-1)
       if (!previous) return state
-      const current = { paragraphs: clone(state.paragraphs), comments: clone(state.comments), versions: clone(state.versions) }
-      persistDraft(previous.paragraphs, previous.comments, previous.versions)
+      const current: HistorySnapshot = { paragraphs: clone(state.paragraphs), comments: clone(state.comments), versions: clone(state.versions), arbitrations: clone(state.arbitrations) }
+      persistDraft(previous.paragraphs, previous.comments, previous.versions, previous.arbitrations)
       return { ...previous, past: state.past.slice(0, -1), future: [current, ...state.future], dirty: true }
     }),
     redo: () => set((state) => {
       const next = state.future[0]
       if (!next) return state
-      const current = { paragraphs: clone(state.paragraphs), comments: clone(state.comments), versions: clone(state.versions) }
-      persistDraft(next.paragraphs, next.comments, next.versions)
+      const current: HistorySnapshot = { paragraphs: clone(state.paragraphs), comments: clone(state.comments), versions: clone(state.versions), arbitrations: clone(state.arbitrations) }
+      persistDraft(next.paragraphs, next.comments, next.versions, next.arbitrations)
       return { ...next, past: [...state.past, current], future: state.future.slice(1), dirty: true }
     }),
     save: () => {
-      persistDraft(get().paragraphs, get().comments, get().versions)
+      persistDraft(get().paragraphs, get().comments, get().versions, get().arbitrations)
       set({ dirty: false })
     },
     resetDemo: () => {
       localStorage.removeItem(DRAFT_KEY)
-      set({ paragraphs: clone(baseParagraphs), comments: clone(baseComments), versions: clone(initialVersions), conflicts: [], past: [], future: [], dirty: false })
-      persistDraft(baseParagraphs, baseComments, initialVersions)
+      set({ paragraphs: clone(baseParagraphs), comments: clone(baseComments), versions: clone(initialVersions), arbitrations: [], conflicts: [], past: [], future: [], dirty: false })
+      persistDraft(baseParagraphs, baseComments, initialVersions, [])
     },
   }
 })

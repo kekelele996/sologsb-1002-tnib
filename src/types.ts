@@ -1,7 +1,8 @@
 export type Role = 'author' | 'reviewer' | 'editor'
 export type ParagraphStatus = 'open' | 'accepted' | 'locked'
-export type CommentStatus = 'open' | 'accepted' | 'rejected' | 'merged'
+export type CommentStatus = 'open' | 'accepted' | 'rejected' | 'merged' | 'minority'
 export type CommentType = 'comment' | 'suggestion'
+export type ArbitrationStatus = 'active' | 'applied' | 'rejected' | 'superseded'
 
 export interface Reply {
   id: string
@@ -53,8 +54,23 @@ export interface EditConflict {
   detectedAt: number
 }
 
+export interface Arbitration {
+  id: string
+  paragraphId: string
+  commentIds: string[]
+  winnerCommentId: string | null
+  mergedText: string | null
+  rationale: string
+  status: ArbitrationStatus
+  baseText: string
+  snapshots: Record<string, { quote: string; suggestion: string }>
+  createdAt: number
+  decidedAt?: number
+}
+
 export interface HistorySnapshot {
   paragraphs: Paragraph[]
   comments: Comment[]
   versions: Version[]
+  arbitrations: Arbitration[]
 }

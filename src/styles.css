@@ -66,6 +66,27 @@ button, input, textarea { font: inherit; }
 .comment-card.accepted { border-left: 3px solid #3b8c67; }
 .comment-card.rejected { opacity: .65; border-left: 3px solid #bd5c53; }
 .comment-card.merged { opacity: .65; border-left: 3px solid #6b73b8; }
+.comment-card.minority { opacity: .78; border-left: 3px solid #8e6fc0; }
+.covered-tip { display: inline-block; margin-left: 6px; color: #8e7fb8; font-size: 9px; }
+.arbitration-list { display: grid; gap: 9px; padding: 0 12px 12px; }
+.arbitration-card { padding: 10px; border: 1px solid #ddcda6; border-left: 3px solid #c8932f; border-radius: 8px; background: #fffaf0; box-shadow: 0 3px 12px rgba(64,53,43,.05); }
+.arbitration-card.stale { border-left-color: #d46b4d; background: #fff6f1; }
+.arbitration-card.closed { opacity: .78; background: #faf7f1; }
+.arbitration-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 7px; }
+.arbitration-title { padding: 0; border: 0; color: #6b5320; background: transparent; font-size: 11px; font-weight: 700; cursor: pointer; }
+.arbitration-title:hover { color: #8a6a2a; text-decoration: underline; }
+.arbitration-recommend { padding: 8px; border: 1px dashed #c8a86a; border-radius: 6px; background: #fffdf6; }
+.arbitration-recommend small { color: #8a6a2a; font-size: 9px; font-weight: 700; }
+.arbitration-recommend p { margin: 4px 0 0; color: #5c4a1f; font-family: Georgia, "Songti SC", serif; font-size: 11px; line-height: 1.6; }
+.arbitration-rationale { margin: 8px 0 0; color: #55462c; font-size: 11px; line-height: 1.55; }
+.arbitration-minority { display: grid; gap: 4px; margin-top: 8px; }
+.minority-item { padding: 5px 7px; border-radius: 5px; color: #7a6c5c; background: #f5efe4; font-size: 10px; line-height: 1.5; }
+.minority-item .ant-tag { margin-right: 4px; }
+.arbitration-card .ant-alert { margin-top: 8px; padding: 5px 10px; font-size: 11px; }
+.arbitration-actions { display: flex; gap: 6px; margin-top: 9px; }
+.arbitrate-candidates { display: grid; gap: 6px; width: 100%; }
+.arbitrate-candidate { display: flex; align-items: flex-start; padding: 8px 10px; border: 1px solid #e2d9cd; border-radius: 6px; background: #fffdf9; font-size: 12px; line-height: 1.55; white-space: normal; }
+.arbitrate-candidate .ant-radio { margin-top: 3px; }
 .comment-card .ant-card-head { min-height: 37px; padding: 0 10px; }
 .comment-card .ant-card-head-title { font-size: 11px; }
 .comment-card .ant-card-extra small { font-size: 9px; }

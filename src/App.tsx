@@ -3,26 +3,26 @@ import {
   ArrowLeftOutlined, ArrowRightOutlined, BranchesOutlined, CheckOutlined, CloseOutlined,
   CommentOutlined, DiffOutlined, DeleteOutlined, FileDoneOutlined, FileTextOutlined,
   HistoryOutlined, LockOutlined, MenuFoldOutlined, MessageOutlined, PlusOutlined,
-  RedoOutlined, SaveOutlined, SendOutlined, SwapOutlined, UndoOutlined, UnlockOutlined, UserSwitchOutlined,
+  RedoOutlined, SaveOutlined, AuditOutlined, SendOutlined, SwapOutlined, UndoOutlined, UnlockOutlined, UserSwitchOutlined,
 } from '@ant-design/icons'
 import { Alert, Badge, Button, Card, Checkbox, Divider, Empty, Input, Modal, Radio, Segmented, Select, Space, Tag, Tooltip, message } from 'antd'
 import { submitRemotePatch } from './services/mockApi'
-import { useReviewStore } from './store/review'
+import { findCoveringArbitration, isArbitrationStale, useReviewStore } from './store/review'
 import type { Comment, CommentType, Paragraph, Role } from './types'
 
 const roleMeta: Record<Role, { label: string; description: string; color: string }> = {
-  author: { label: '作者工作区', description: '编辑正文，逐条接受或拒绝修改建议', color: '#2f6f5e' },
+  author: { label: '作者工作区', description: '编辑正文，依据当前有效裁决接受或拒绝修改建议', color: '#2f6f5e' },
   reviewer: { label: '审稿人工作区', description: '引用原文、添加批注与修改建议并参与讨论', color: '#9a5b25' },
-  editor: { label: '编辑工作区', description: '合并重复意见、锁定已确认段落并比较版本', color: '#5b4d8e' },
+  editor: { label: '编辑工作区', description: '裁决冲突建议、合并重复意见、锁定已确认段落并比较版本', color: '#5b4d8e' },
 }
 const roleIcon = (role: Role) => role === 'author' ? <FileDoneOutlined /> : role === 'reviewer' ? <CommentOutlined /> : <BranchesOutlined />
 const formatDate = (value: number) => new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 
 export default function App() {
   const {
-    role, paragraphs, comments, versions, selectedParagraphId, commentFilter, revisionMode, dirty, conflicts,
+    role, paragraphs, comments, versions, arbitrations, selectedParagraphId, commentFilter, revisionMode, dirty, conflicts,
     setRole, selectParagraph, setCommentFilter, setRevisionMode, updateParagraph, addComment, replyComment,
-    resolveSuggestion, mergeComment, toggleLock, createVersion, addConflict, resolveConflict, dismissConflict,
+    resolveSuggestion, mergeComment, arbitrate, applyArbitration, toggleLock, createVersion, addConflict, resolveConflict, dismissConflict,
     undo, redo, save, resetDemo,
   } = useReviewStore()
   const [composerOpen, setComposerOpen] = useState(false)
@@ -35,6 +35,11 @@ export default function App() {
   const [versionA, setVersionA] = useState(versions[1]?.id ?? versions[0]?.id)
   const [versionB, setVersionB] = useState(versions[0]?.id)
   const [versionLabel, setVersionLabel] = useState('')
+  const [arbitrateParagraphId, setArbitrateParagraphId] = useState<string | null>(null)
+  const [arbitrateMode, setArbitrateMode] = useState<'pick' | 'merge'>('pick')
+  const [arbitrateWinner, setArbitrateWinner] = useState<string | null>(null)
+  const [arbitrateMerged, setArbitrateMerged] = useState('')
+  const [arbitrateRationale, setArbitrateRationale] = useState('')
 
   const selected = paragraphs.find((paragraph) => paragraph.id === selectedParagraphId) ?? paragraphs[0]
   const sections = useMemo(() => Array.from(new Set(paragraphs.map((paragraph) => paragraph.section))), [paragraphs])
@@ -49,6 +54,20 @@ export default function App() {
     if (commentFilter === 'duplicate') return duplicateParagraphIds.has(comment.paragraphId) && comment.status === 'open'
     return true
   }).sort((a, b) => b.createdAt - a.createdAt), [commentFilter, comments, duplicateParagraphIds])
+  const latestArbitrations = useMemo(() => {
+    const byParagraph = new Map<string, (typeof arbitrations)[number]>()
+    arbitrations.forEach((arbitration) => {
+      const existing = byParagraph.get(arbitration.paragraphId)
+      if (!existing || arbitration.createdAt > existing.createdAt) byParagraph.set(arbitration.paragraphId, arbitration)
+    })
+    return Array.from(byParagraph.values()).sort((a, b) => b.createdAt - a.createdAt)
+  }, [arbitrations])
+  const staleArbitrationIds = useMemo(() => new Set(
+    arbitrations.filter((arbitration) => isArbitrationStale(arbitration, paragraphs, comments)).map((arbitration) => arbitration.id),
+  ), [arbitrations, paragraphs, comments])
+  const arbitrateCandidates = useMemo(() => arbitrateParagraphId
+    ? comments.filter((item) => item.paragraphId === arbitrateParagraphId && item.type === 'suggestion' && (item.status === 'open' || item.status === 'minority'))
+    : [], [arbitrateParagraphId, comments])
 
   useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -116,6 +135,32 @@ export default function App() {
     else createVersion('')
     setVersionLabel('')
     message.success('当前版本已保存')
+  }
+  const openArbitrateModal = (paragraphId: string) => {
+    const candidates = comments.filter((item) => item.paragraphId === paragraphId && item.type === 'suggestion' && (item.status === 'open' || item.status === 'minority'))
+    setArbitrateParagraphId(paragraphId)
+    setArbitrateMode('pick')
+    setArbitrateWinner(candidates[0]?.id ?? null)
+    setArbitrateMerged(paragraphs.find((paragraph) => paragraph.id === paragraphId)?.text ?? '')
+    setArbitrateRationale('')
+  }
+  const submitArbitration = () => {
+    if (!arbitrateParagraphId) return
+    const error = arbitrate({
+      paragraphId: arbitrateParagraphId,
+      commentIds: arbitrateCandidates.map((item) => item.id),
+      winnerCommentId: arbitrateMode === 'pick' ? arbitrateWinner : null,
+      mergedText: arbitrateMode === 'merge' ? arbitrateMerged : null,
+      rationale: arbitrateRationale,
+    })
+    if (error) { message.error(error); return }
+    setArbitrateParagraphId(null)
+    message.success('裁决已提交，作者将基于当前有效裁决处理')
+  }
+  const handleApplyArbitration = (arbitrationId: string, accepted: boolean) => {
+    const error = applyArbitration(arbitrationId, accepted)
+    if (error) { message.error(error); return }
+    message.success(accepted ? '已接受裁决，正文已更新' : '已拒绝该裁决')
   }
   const comparedA = versions.find((version) => version.id === versionA)
   const comparedB = versions.find((version) => version.id === versionB)
@@ -228,7 +273,18 @@ export default function App() {
                     <div className="paragraph-actions">
                       {role === 'reviewer' && <><Button size="small" icon={<CommentOutlined />} onClick={(event) => { event.stopPropagation(); selectParagraph(paragraph.id); openComposer('comment') }}>添加批注</Button><Button size="small" icon={<FileDoneOutlined />} onClick={(event) => { event.stopPropagation(); selectParagraph(paragraph.id); openComposer('suggestion') }}>提出建议</Button></>}
                       {role === 'editor' && <Button size="small" icon={paragraph.status === 'locked' ? <UnlockOutlined /> : <LockOutlined />} onClick={(event) => { event.stopPropagation(); toggleLock(paragraph.id) }}>{paragraph.status === 'locked' ? '解除锁定' : '锁定段落'}</Button>}
-                      {role === 'author' && <span className="author-tip">可直接修改正文，右侧逐条处理建议</span>}
+                      {role === 'editor' && (() => {
+                        const candidates = comments.filter((item) => item.paragraphId === paragraph.id && item.type === 'suggestion' && (item.status === 'open' || item.status === 'minority'))
+                        const hasActive = arbitrations.some((item) => item.paragraphId === paragraph.id && item.status === 'active')
+                        if (candidates.length < 2 || hasActive) return null
+                        const blockedReason = paragraph.status === 'locked' ? '段落已锁定，裁决不能生效' : conflicts.some((item) => item.paragraphId === paragraph.id) ? '存在未处理的远端冲突，裁决不能生效' : ''
+                        return (
+                          <Tooltip title={blockedReason}>
+                            <Button size="small" type="dashed" icon={<AuditOutlined />} disabled={!!blockedReason} onClick={(event) => { event.stopPropagation(); selectParagraph(paragraph.id); openArbitrateModal(paragraph.id) }}>裁决冲突建议（{candidates.length}）</Button>
+                          </Tooltip>
+                        )
+                      })()}
+                      {role === 'author' && <span className="author-tip">可直接修改正文，右侧处理编辑裁决与建议</span>}
                     </div>
                   </article>
                 ))}
@@ -246,15 +302,69 @@ export default function App() {
               <Radio.Button value="all">全部</Radio.Button><Radio.Button value="open">待处理</Radio.Button><Radio.Button value="suggestion">建议</Radio.Button><Radio.Button value="duplicate">重复</Radio.Button>
             </Radio.Group>
           </div>
+          {latestArbitrations.length > 0 && (
+            <div className="arbitration-list">
+              <div className="panel-title"><AuditOutlined /> 编辑裁决</div>
+              {latestArbitrations.map((arbitration) => {
+                const paragraph = paragraphs.find((item) => item.id === arbitration.paragraphId)
+                const stale = staleArbitrationIds.has(arbitration.id)
+                const locked = paragraph?.status === 'locked'
+                const conflicted = conflicts.some((item) => item.paragraphId === arbitration.paragraphId)
+                const blocked = locked || conflicted
+                const winner = arbitration.winnerCommentId ? comments.find((item) => item.id === arbitration.winnerCommentId) : null
+                const recommended = arbitration.mergedText ?? winner?.suggestion ?? ''
+                const minorities = comments.filter((item) => arbitration.commentIds.includes(item.id) && item.id !== arbitration.winnerCommentId)
+                return (
+                  <div key={arbitration.id} className={`arbitration-card ${stale ? 'stale' : ''} ${arbitration.status !== 'active' ? 'closed' : ''}`}>
+                    <div className="arbitration-head">
+                      <button className="arbitration-title" onClick={() => paragraph && scrollToParagraph(paragraph.id)}>段落 {paragraph?.number} 冲突建议裁决</button>
+                      {arbitration.status === 'applied' && <Tag color="green">已采纳</Tag>}
+                      {arbitration.status === 'rejected' && <Tag color="red">已拒绝</Tag>}
+                      {arbitration.status === 'active' && (stale ? <Tag color="orange">已失效 · 待重新仲裁</Tag> : <Tag color="geekblue">当前有效裁决</Tag>)}
+                    </div>
+                    <div className="arbitration-recommend">
+                      <small>{arbitration.mergedText ? '合并后的推荐正文' : `采纳 ${winner?.author ?? ''} 的建议`}</small>
+                      <p>{recommended}</p>
+                    </div>
+                    <p className="arbitration-rationale"><b>裁决理由：</b>{arbitration.rationale}</p>
+                    {minorities.length > 0 && (
+                      <div className="arbitration-minority">
+                        {minorities.map((item) => <div key={item.id} className="minority-item"><Tag color="purple">少数意见</Tag><b>{item.author}</b>：{item.body}</div>)}
+                      </div>
+                    )}
+                    {stale && <Alert type="warning" showIcon message="正文、建议内容或引用范围已变化，裁决失效，请编辑重新仲裁。" />}
+                    {arbitration.status === 'active' && !stale && blocked && <Alert type="info" showIcon message={locked ? '段落已锁定，裁决暂不能生效。' : '该段落存在未处理的远端冲突，处理后方可生效。'} />}
+                    {arbitration.status === 'active' && !stale && role === 'author' && (
+                      <div className="arbitration-actions">
+                        <Tooltip title={blocked ? (locked ? '段落已锁定，裁决不能生效' : '存在未处理的远端冲突，裁决不能生效') : ''}>
+                          <Button type="primary" size="small" icon={<CheckOutlined />} disabled={blocked} onClick={() => handleApplyArbitration(arbitration.id, true)}>接受裁决</Button>
+                        </Tooltip>
+                        <Button danger size="small" icon={<CloseOutlined />} disabled={blocked} onClick={() => handleApplyArbitration(arbitration.id, false)}>拒绝裁决</Button>
+                      </div>
+                    )}
+                    {arbitration.status === 'active' && role === 'editor' && (
+                      <div className="arbitration-actions">
+                        <Button size="small" icon={<AuditOutlined />} onClick={() => openArbitrateModal(arbitration.paragraphId)}>重新仲裁</Button>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
           <div className="comment-list">
             {visibleComments.map((comment) => {
               const paragraph = paragraphs.find((item) => item.id === comment.paragraphId)
+              const covered = findCoveringArbitration(arbitrations, comment.paragraphId, comment.id)
+              const isWinner = covered?.winnerCommentId === comment.id
               return (
                 <Card key={comment.id} size="small" className={`comment-card ${comment.status}`} title={<span>{comment.author} <Tag>{comment.type === 'suggestion' ? '修改建议' : '段落批注'}</Tag></span>} extra={<small>{formatDate(comment.createdAt)}</small>}>
                   <button className="quote-line" onClick={() => paragraph && scrollToParagraph(paragraph.id)}>“{comment.quote}” · 段落 {paragraph?.number}</button>
                   <p className="comment-body">{comment.body}</p>
                   {comment.suggestion && <div className="suggestion-box"><small>建议改为</small><p>{comment.suggestion}</p></div>}
-                  {comment.status !== 'open' && <Tag color={comment.status === 'accepted' ? 'green' : comment.status === 'rejected' ? 'red' : 'blue'}>{comment.status === 'accepted' ? '已接受' : comment.status === 'rejected' ? '已拒绝' : '已合并'}</Tag>}
+                  {comment.status !== 'open' && <Tag color={comment.status === 'accepted' ? 'green' : comment.status === 'rejected' ? 'red' : comment.status === 'minority' ? 'purple' : 'blue'}>{comment.status === 'accepted' ? '已接受' : comment.status === 'rejected' ? '已拒绝' : comment.status === 'minority' ? '少数意见' : '已合并'}</Tag>}
+                  {isWinner && <Tag color="geekblue">当前裁决采纳</Tag>}
+                  {covered && !isWinner && comment.status === 'minority' && <small className="covered-tip">已由编辑裁决，保留为少数意见</small>}
                   <div className="replies">
                     {comment.replies.map((reply) => <div key={reply.id} className="reply"><b>{reply.author}</b><span>{reply.body}</span></div>)}
                   </div>
@@ -262,8 +372,8 @@ export default function App() {
                     <Input size="small" value={replyDrafts[comment.id] ?? ''} onChange={(event) => setReplyDrafts((drafts) => ({ ...drafts, [comment.id]: event.target.value }))} placeholder="回复讨论…" onPressEnter={() => { const body = replyDrafts[comment.id]?.trim(); if (body) { replyComment(comment.id, body); setReplyDrafts((drafts) => ({ ...drafts, [comment.id]: '' })) } }} />
                     <Button size="small" type="text" icon={<SendOutlined />} onClick={() => { const body = replyDrafts[comment.id]?.trim(); if (body) { replyComment(comment.id, body); setReplyDrafts((drafts) => ({ ...drafts, [comment.id]: '' })) } }} />
                   </div>
-                  {comment.status === 'open' && role === 'author' && comment.type === 'suggestion' && <div className="decision-row"><Button type="primary" size="small" icon={<CheckOutlined />} onClick={() => resolveSuggestion(comment.id, true)}>接受修改</Button><Button danger size="small" icon={<CloseOutlined />} onClick={() => resolveSuggestion(comment.id, false)}>拒绝</Button></div>}
-                  {comment.status === 'open' && role === 'editor' && duplicateParagraphIds.has(comment.paragraphId) && (() => {
+                  {comment.status === 'open' && role === 'author' && comment.type === 'suggestion' && !covered && <div className="decision-row"><Button type="primary" size="small" icon={<CheckOutlined />} onClick={() => resolveSuggestion(comment.id, true)}>接受修改</Button><Button danger size="small" icon={<CloseOutlined />} onClick={() => resolveSuggestion(comment.id, false)}>拒绝</Button></div>}
+                  {comment.status === 'open' && role === 'editor' && !covered && duplicateParagraphIds.has(comment.paragraphId) && (() => {
                     const sibling = comments.find((item) => item.id !== comment.id && item.paragraphId === comment.paragraphId && item.status === 'open')
                     return sibling ? <Button size="small" type="dashed" icon={<BranchesOutlined />} onClick={() => mergeComment(comment.id, sibling.id)}>合并到“{sibling.author}”意见</Button> : null
                   })()}
@@ -284,6 +394,37 @@ export default function App() {
           {commentType === 'suggestion' && <Input.TextArea value={suggestion} onChange={(event) => setSuggestion(event.target.value)} autoSize={{ minRows: 3, maxRows: 7 }} />}
           <label>说明</label>
           <Input.TextArea value={commentBody} onChange={(event) => setCommentBody(event.target.value)} placeholder="说明修改理由或希望作者关注的问题" autoSize={{ minRows: 2, maxRows: 5 }} />
+        </div>
+      </Modal>
+
+      <Modal title="裁决冲突修改建议" open={!!arbitrateParagraphId} onCancel={() => setArbitrateParagraphId(null)} onOk={submitArbitration} okText="提交裁决" width={640}>
+        <div className="composer">
+          <Alert
+            type="info" showIcon
+            message={`段落 ${paragraphs.find((item) => item.id === arbitrateParagraphId)?.number ?? ''} 有 ${arbitrateCandidates.length} 条互相冲突的修改建议`}
+            description="请选择一条作为推荐，或给出合并后的推荐正文，并填写裁决理由。提交后作者只能处理该裁决，其余原意见保留为少数意见。"
+          />
+          <label>裁决方式</label>
+          <Radio.Group value={arbitrateMode} onChange={(event) => setArbitrateMode(event.target.value as 'pick' | 'merge')}>
+            <Radio.Button value="pick">选择一条建议</Radio.Button>
+            <Radio.Button value="merge">合并后的推荐正文</Radio.Button>
+          </Radio.Group>
+          {arbitrateMode === 'pick' ? (
+            <Radio.Group className="arbitrate-candidates" value={arbitrateWinner} onChange={(event) => setArbitrateWinner(event.target.value as string)}>
+              {arbitrateCandidates.map((candidate) => (
+                <Radio key={candidate.id} value={candidate.id} className="arbitrate-candidate">
+                  <b>{candidate.author}</b>：{candidate.suggestion}
+                </Radio>
+              ))}
+            </Radio.Group>
+          ) : (
+            <>
+              <label>合并后的推荐正文</label>
+              <Input.TextArea value={arbitrateMerged} onChange={(event) => setArbitrateMerged(event.target.value)} autoSize={{ minRows: 3, maxRows: 7 }} />
+            </>
+          )}
+          <label>裁决理由（必填）</label>
+          <Input.TextArea value={arbitrateRationale} onChange={(event) => setArbitrateRationale(event.target.value)} placeholder="说明为何采纳该建议或如此合并，供作者与审稿人查阅" autoSize={{ minRows: 2, maxRows: 5 }} />
         </div>
       </Modal>
 
