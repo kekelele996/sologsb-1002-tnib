@@ -80,6 +80,27 @@ button, input, textarea { font: inherit; }
 .reply b { flex: none; color: #7b3f2f; }
 .reply-box { display: flex; margin-top: 8px; }
 .decision-row { display: flex; gap: 6px; margin-top: 9px; }
+.ruled-tip { margin: 9px 0 0; padding: 6px 8px; border-radius: 5px; background: #fdf6e3; color: #977f4f; font-size: 10px; }
+.ruling-alert { margin: 0 12px 10px; }
+.ruling-list { display: grid; gap: 9px; padding: 0 12px 12px; }
+.ruling-card { padding: 10px 11px; border: 1px solid #e6d3a8; border-radius: 8px; background: #fffdf3; }
+.ruling-card.stale { border-color: #e4bcb7; background: #fffaf9; }
+.ruling-card.resolved { opacity: .78; border-color: #e2dbd3; background: #faf8f4; }
+.ruling-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ruling-title { padding: 0; border: 0; color: #7a5b18; background: transparent; font-size: 12px; font-weight: 700; cursor: pointer; }
+.ruling-title:hover { color: #a67c1f; }
+.ruling-text { margin-top: 8px; padding: 8px; border: 1px solid #eadfc2; border-radius: 6px; background: #fffaf0; }
+.ruling-text small { color: #8a6d2f; font-size: 9px; font-weight: 700; }
+.ruling-text p { margin: 4px 0 0; color: #5c4d2a; font-family: Georgia, "Songti SC", serif; font-size: 11px; line-height: 1.6; }
+.ruling-rationale { margin: 8px 0 0; color: #6f6156; font-size: 11px; line-height: 1.5; }
+.ruling-minority { margin: 6px 0 0; color: #a08e7d; font-size: 10px; }
+.ruling-waiting { margin: 8px 0 0; color: #a08e7d; font-size: 10px; }
+.ruling-actions { display: flex; gap: 6px; margin-top: 9px; }
+.ruling-card .ant-alert { margin-top: 8px; }
+.arbitration-options { display: flex; flex-direction: column; gap: 10px; }
+.arbitration-options .ant-radio-wrapper { align-items: flex-start; white-space: normal; margin-inline-end: 0; }
+.arbitration-options .ant-radio { margin-top: 3px; }
+.arbitration-option-text { color: #4d453e; font-size: 12px; line-height: 1.6; }
 .comments-panel > .keyboard-hint { position: fixed; right: 0; bottom: 0; width: 400px; z-index: 6; display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 12px; color: #9e9287; background: rgba(40,35,31,.96); font-size: 9px; }
 kbd { padding: 1px 4px; border: 1px solid #706158; border-radius: 3px; color: #f5e7d7; background: #50453d; }
 .compare-selectors { display: grid; grid-template-columns: 1fr 30px 1fr; align-items: center; gap: 10px; margin-bottom: 14px; text-align: center; }

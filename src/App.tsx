@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  ArrowLeftOutlined, ArrowRightOutlined, BranchesOutlined, CheckOutlined, CloseOutlined,
+  ArrowLeftOutlined, ArrowRightOutlined, AuditOutlined, BranchesOutlined, CheckOutlined, CloseOutlined,
   CommentOutlined, DiffOutlined, DeleteOutlined, FileDoneOutlined, FileTextOutlined,
   HistoryOutlined, LockOutlined, MenuFoldOutlined, MessageOutlined, PlusOutlined,
   RedoOutlined, SaveOutlined, SendOutlined, SwapOutlined, UndoOutlined, UnlockOutlined, UserSwitchOutlined,
@@ -8,21 +8,30 @@ import {
 import { Alert, Badge, Button, Card, Checkbox, Divider, Empty, Input, Modal, Radio, Segmented, Select, Space, Tag, Tooltip, message } from 'antd'
 import { submitRemotePatch } from './services/mockApi'
 import { useReviewStore } from './store/review'
-import type { Comment, CommentType, Paragraph, Role } from './types'
+import type { Comment, CommentType, Paragraph, Role, Ruling } from './types'
 
 const roleMeta: Record<Role, { label: string; description: string; color: string }> = {
-  author: { label: '作者工作区', description: '编辑正文，逐条接受或拒绝修改建议', color: '#2f6f5e' },
+  author: { label: '作者工作区', description: '编辑正文，按编辑裁决处理冲突建议，逐条接受或拒绝其余建议', color: '#2f6f5e' },
   reviewer: { label: '审稿人工作区', description: '引用原文、添加批注与修改建议并参与讨论', color: '#9a5b25' },
-  editor: { label: '编辑工作区', description: '合并重复意见、锁定已确认段落并比较版本', color: '#5b4d8e' },
+  editor: { label: '编辑工作区', description: '仲裁冲突建议、合并重复意见、锁定已确认段落并比较版本', color: '#5b4d8e' },
 }
 const roleIcon = (role: Role) => role === 'author' ? <FileDoneOutlined /> : role === 'reviewer' ? <CommentOutlined /> : <BranchesOutlined />
 const formatDate = (value: number) => new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+const rulingReasonText = (reason?: string) => ({
+  locked: '段落已锁定，裁决不能生效',
+  conflict: '该段落存在未处理的远端冲突，裁决不能生效',
+  rationale: '请填写裁决理由',
+  empty: '请选择一条胜出建议，或填写合并后的推荐正文',
+  inactive: '该裁决已失效或已被处理',
+  'no-conflict': '同段落至少需要两条待处理的修改建议才能仲裁',
+  missing: '段落不存在',
+}[reason ?? ''] ?? '操作失败')
 
 export default function App() {
   const {
-    role, paragraphs, comments, versions, selectedParagraphId, commentFilter, revisionMode, dirty, conflicts,
+    role, paragraphs, comments, versions, rulings, selectedParagraphId, commentFilter, revisionMode, dirty, conflicts,
     setRole, selectParagraph, setCommentFilter, setRevisionMode, updateParagraph, addComment, replyComment,
-    resolveSuggestion, mergeComment, toggleLock, createVersion, addConflict, resolveConflict, dismissConflict,
+    resolveSuggestion, mergeComment, createRuling, resolveRuling, toggleLock, createVersion, addConflict, resolveConflict, dismissConflict,
     undo, redo, save, resetDemo,
   } = useReviewStore()
   const [composerOpen, setComposerOpen] = useState(false)
@@ -35,6 +44,10 @@ export default function App() {
   const [versionA, setVersionA] = useState(versions[1]?.id ?? versions[0]?.id)
   const [versionB, setVersionB] = useState(versions[0]?.id)
   const [versionLabel, setVersionLabel] = useState('')
+  const [rulingOpen, setRulingOpen] = useState(false)
+  const [rulingChoice, setRulingChoice] = useState('')
+  const [rulingMerged, setRulingMerged] = useState('')
+  const [rulingRationale, setRulingRationale] = useState('')
 
   const selected = paragraphs.find((paragraph) => paragraph.id === selectedParagraphId) ?? paragraphs[0]
   const sections = useMemo(() => Array.from(new Set(paragraphs.map((paragraph) => paragraph.section))), [paragraphs])
@@ -49,6 +62,35 @@ export default function App() {
     if (commentFilter === 'duplicate') return duplicateParagraphIds.has(comment.paragraphId) && comment.status === 'open'
     return true
   }).sort((a, b) => b.createdAt - a.createdAt), [commentFilter, comments, duplicateParagraphIds])
+  const openSuggestionsByParagraph = useMemo(() => {
+    const map = new Map<string, Comment[]>()
+    comments.forEach((comment) => {
+      if (comment.type === 'suggestion' && comment.status === 'open') map.set(comment.paragraphId, [...(map.get(comment.paragraphId) ?? []), comment])
+    })
+    return map
+  }, [comments])
+  const activeRuledCommentIds = useMemo(() => new Set(rulings.filter((ruling) => ruling.status === 'active').flatMap((ruling) => ruling.commentIds)), [rulings])
+  const commentRulingMeta = useMemo(() => {
+    const map = new Map<string, { ruling: Ruling; isWinner: boolean }>()
+    rulings.forEach((ruling) => {
+      if (ruling.status === 'stale') return
+      ruling.commentIds.forEach((commentId) => {
+        const existing = map.get(commentId)
+        if (!existing || ruling.status === 'active') map.set(commentId, { ruling, isWinner: !ruling.mergedText && ruling.winnerCommentId === commentId })
+      })
+    })
+    return map
+  }, [rulings])
+  const sortedRulings = useMemo(() => [...rulings].sort((a, b) => {
+    const weight = (ruling: Ruling) => ruling.status === 'active' ? 0 : ruling.status === 'stale' ? 1 : 2
+    return weight(a) - weight(b) || b.createdAt - a.createdAt
+  }), [rulings])
+  const staleRulingCount = rulings.filter((ruling) => ruling.status === 'stale').length
+  const rulingBlockedReason = (ruling: Ruling) => {
+    if (paragraphs.find((paragraph) => paragraph.id === ruling.paragraphId)?.status === 'locked') return '段落已锁定，裁决暂不能生效'
+    if (conflicts.some((conflict) => conflict.paragraphId === ruling.paragraphId)) return '该段落存在未处理的远端冲突，裁决暂不能生效'
+    return null
+  }
 
   useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -117,6 +159,34 @@ export default function App() {
     setVersionLabel('')
     message.success('当前版本已保存')
   }
+  const openArbitration = (paragraphId: string, prefill?: Ruling) => {
+    selectParagraph(paragraphId)
+    const suggestions = openSuggestionsByParagraph.get(paragraphId) ?? []
+    setRulingChoice(prefill ? (prefill.mergedText ? '__merge__' : prefill.winnerCommentId ?? '') : suggestions[0]?.id ?? '')
+    setRulingMerged(prefill?.mergedText ?? '')
+    setRulingRationale(prefill?.rationale ?? '')
+    setRulingOpen(true)
+  }
+  const submitRuling = () => {
+    if (!selected) return
+    const merge = rulingChoice === '__merge__'
+    const result = createRuling({
+      paragraphId: selected.id,
+      commentIds: (openSuggestionsByParagraph.get(selected.id) ?? []).map((comment) => comment.id),
+      winnerCommentId: merge ? undefined : rulingChoice || undefined,
+      mergedText: merge ? rulingMerged : undefined,
+      rationale: rulingRationale,
+    })
+    if (!result.ok) { message.warning(rulingReasonText(result.reason)); return }
+    setRulingOpen(false); setRulingChoice(''); setRulingMerged(''); setRulingRationale('')
+    message.success('裁决已发布，作者将按推荐正文处理，其余意见保留为少数意见')
+  }
+  const handleResolveRuling = (rulingId: string, accepted: boolean) => {
+    const result = resolveRuling(rulingId, accepted)
+    if (!result.ok) { message.warning(rulingReasonText(result.reason)); return }
+    message.success(accepted ? '已采纳裁决推荐正文' : '已标记不采纳，原建议恢复逐条处理')
+  }
+  const arbitrationSuggestions = selected ? openSuggestionsByParagraph.get(selected.id) ?? [] : []
   const comparedA = versions.find((version) => version.id === versionA)
   const comparedB = versions.find((version) => version.id === versionB)
   const comparedRows = comparedA && comparedB ? comparedA.paragraphs.map((paragraph, index) => ({ a: paragraph, b: comparedB.paragraphs[index] })) : []
@@ -228,6 +298,11 @@ export default function App() {
                     <div className="paragraph-actions">
                       {role === 'reviewer' && <><Button size="small" icon={<CommentOutlined />} onClick={(event) => { event.stopPropagation(); selectParagraph(paragraph.id); openComposer('comment') }}>添加批注</Button><Button size="small" icon={<FileDoneOutlined />} onClick={(event) => { event.stopPropagation(); selectParagraph(paragraph.id); openComposer('suggestion') }}>提出建议</Button></>}
                       {role === 'editor' && <Button size="small" icon={paragraph.status === 'locked' ? <UnlockOutlined /> : <LockOutlined />} onClick={(event) => { event.stopPropagation(); toggleLock(paragraph.id) }}>{paragraph.status === 'locked' ? '解除锁定' : '锁定段落'}</Button>}
+                      {role === 'editor' && (openSuggestionsByParagraph.get(paragraph.id)?.length ?? 0) >= 2 && (() => {
+                        const blockedTip = paragraph.status === 'locked' ? '段落已锁定，不能发布裁决' : conflicts.some((conflict) => conflict.paragraphId === paragraph.id) ? '存在未处理的远端冲突，不能发布裁决' : ''
+                        const button = <Button size="small" type="primary" ghost icon={<AuditOutlined />} disabled={!!blockedTip} onClick={(event) => { event.stopPropagation(); openArbitration(paragraph.id) }}>仲裁冲突建议</Button>
+                        return blockedTip ? <Tooltip title={blockedTip}>{button}</Tooltip> : button
+                      })()}
                       {role === 'author' && <span className="author-tip">可直接修改正文，右侧逐条处理建议</span>}
                     </div>
                   </article>
@@ -246,6 +321,45 @@ export default function App() {
               <Radio.Button value="all">全部</Radio.Button><Radio.Button value="open">待处理</Radio.Button><Radio.Button value="suggestion">建议</Radio.Button><Radio.Button value="duplicate">重复</Radio.Button>
             </Radio.Group>
           </div>
+          {staleRulingCount > 0 && <Alert className="ruling-alert" type="warning" showIcon message={`${staleRulingCount} 项裁决因正文、建议内容或引用范围变化已失效${role === 'editor' ? '，请重新仲裁' : '，等待编辑重新仲裁'}`} />}
+          {sortedRulings.length > 0 && (
+            <div className="ruling-list">
+              {sortedRulings.map((ruling) => {
+                const paragraph = paragraphs.find((item) => item.id === ruling.paragraphId)
+                const winner = comments.find((item) => item.id === ruling.winnerCommentId)
+                const recommended = ruling.mergedText ?? winner?.suggestion
+                const blocked = ruling.status === 'active' ? rulingBlockedReason(ruling) : null
+                const minorityCount = ruling.commentIds.filter((commentId) => !!ruling.mergedText || commentId !== ruling.winnerCommentId).length
+                return (
+                  <div key={ruling.id} className={`ruling-card ${ruling.status}`}>
+                    <div className="ruling-head">
+                      <button className="ruling-title" onClick={() => paragraph && scrollToParagraph(paragraph.id)}><AuditOutlined /> 编辑裁决 · 段落 {paragraph?.number}</button>
+                      {ruling.status === 'active' && <Tag color="gold">当前有效裁决</Tag>}
+                      {ruling.status === 'stale' && <Tag color="red">已失效 · 待重新仲裁</Tag>}
+                      {ruling.status === 'resolved' && <Tag color={ruling.resolution === 'accepted' ? 'green' : 'default'}>{ruling.resolution === 'accepted' ? '已采纳' : '未采纳'}</Tag>}
+                    </div>
+                    {recommended && <div className="ruling-text"><small>推荐正文{ruling.mergedText ? '（编辑合并）' : ` · 采纳 ${winner?.author ?? ''}`}</small><p>{recommended}</p></div>}
+                    <p className="ruling-rationale">裁决理由：{ruling.rationale}</p>
+                    <p className="ruling-minority">其余 {minorityCount} 条原意见保留为少数意见 · {formatDate(ruling.createdAt)}</p>
+                    {ruling.status === 'stale' && <Alert type="warning" showIcon message="正文、建议内容或引用范围已变化，原裁决不再适用" />}
+                    {blocked && <Alert type="info" showIcon message={blocked} />}
+                    {ruling.status === 'active' && role === 'author' && (
+                      <div className="ruling-actions">
+                        <Button type="primary" size="small" icon={<CheckOutlined />} disabled={!!blocked} onClick={() => handleResolveRuling(ruling.id, true)}>采纳推荐正文</Button>
+                        <Button danger size="small" disabled={!!blocked} onClick={() => handleResolveRuling(ruling.id, false)}>不采纳</Button>
+                      </div>
+                    )}
+                    {ruling.status === 'active' && role !== 'author' && <p className="ruling-waiting">等待作者按当前有效裁决处理</p>}
+                    {role === 'editor' && ruling.status !== 'resolved' && (
+                      <div className="ruling-actions">
+                        <Button size="small" icon={<AuditOutlined />} onClick={() => openArbitration(ruling.paragraphId, ruling)}>重新仲裁</Button>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
           <div className="comment-list">
             {visibleComments.map((comment) => {
               const paragraph = paragraphs.find((item) => item.id === comment.paragraphId)
@@ -255,6 +369,7 @@ export default function App() {
                   <p className="comment-body">{comment.body}</p>
                   {comment.suggestion && <div className="suggestion-box"><small>建议改为</small><p>{comment.suggestion}</p></div>}
                   {comment.status !== 'open' && <Tag color={comment.status === 'accepted' ? 'green' : comment.status === 'rejected' ? 'red' : 'blue'}>{comment.status === 'accepted' ? '已接受' : comment.status === 'rejected' ? '已拒绝' : '已合并'}</Tag>}
+                  {commentRulingMeta.get(comment.id) && <Tag color={commentRulingMeta.get(comment.id)?.isWinner ? 'gold' : 'blue'}>{commentRulingMeta.get(comment.id)?.isWinner ? '裁决推荐' : '少数意见'}</Tag>}
                   <div className="replies">
                     {comment.replies.map((reply) => <div key={reply.id} className="reply"><b>{reply.author}</b><span>{reply.body}</span></div>)}
                   </div>
@@ -262,7 +377,9 @@ export default function App() {
                     <Input size="small" value={replyDrafts[comment.id] ?? ''} onChange={(event) => setReplyDrafts((drafts) => ({ ...drafts, [comment.id]: event.target.value }))} placeholder="回复讨论…" onPressEnter={() => { const body = replyDrafts[comment.id]?.trim(); if (body) { replyComment(comment.id, body); setReplyDrafts((drafts) => ({ ...drafts, [comment.id]: '' })) } }} />
                     <Button size="small" type="text" icon={<SendOutlined />} onClick={() => { const body = replyDrafts[comment.id]?.trim(); if (body) { replyComment(comment.id, body); setReplyDrafts((drafts) => ({ ...drafts, [comment.id]: '' })) } }} />
                   </div>
-                  {comment.status === 'open' && role === 'author' && comment.type === 'suggestion' && <div className="decision-row"><Button type="primary" size="small" icon={<CheckOutlined />} onClick={() => resolveSuggestion(comment.id, true)}>接受修改</Button><Button danger size="small" icon={<CloseOutlined />} onClick={() => resolveSuggestion(comment.id, false)}>拒绝</Button></div>}
+                  {comment.status === 'open' && role === 'author' && comment.type === 'suggestion' && (activeRuledCommentIds.has(comment.id)
+                    ? <p className="ruled-tip">已纳入编辑裁决，请处理上方“当前有效裁决”卡片；本条将作为少数意见保留。</p>
+                    : <div className="decision-row"><Button type="primary" size="small" icon={<CheckOutlined />} onClick={() => resolveSuggestion(comment.id, true)}>接受修改</Button><Button danger size="small" icon={<CloseOutlined />} onClick={() => resolveSuggestion(comment.id, false)}>拒绝</Button></div>)}
                   {comment.status === 'open' && role === 'editor' && duplicateParagraphIds.has(comment.paragraphId) && (() => {
                     const sibling = comments.find((item) => item.id !== comment.id && item.paragraphId === comment.paragraphId && item.status === 'open')
                     return sibling ? <Button size="small" type="dashed" icon={<BranchesOutlined />} onClick={() => mergeComment(comment.id, sibling.id)}>合并到“{sibling.author}”意见</Button> : null
@@ -285,6 +402,31 @@ export default function App() {
           <label>说明</label>
           <Input.TextArea value={commentBody} onChange={(event) => setCommentBody(event.target.value)} placeholder="说明修改理由或希望作者关注的问题" autoSize={{ minRows: 2, maxRows: 5 }} />
         </div>
+      </Modal>
+
+      <Modal title="仲裁冲突建议" open={rulingOpen} onCancel={() => setRulingOpen(false)} onOk={submitRuling} okText="发布裁决" width={640}>
+        {selected && (
+          <div className="composer">
+            <Alert type="info" showIcon message={`段落 ${selected.number} 有 ${arbitrationSuggestions.length} 条互相冲突的修改建议。发布后作者只能按当前有效裁决处理，其余原意见保留为少数意见；正文、建议或引用再变化时裁决将自动失效。`} />
+            <label>裁决方式</label>
+            <Radio.Group className="arbitration-options" value={rulingChoice} onChange={(event) => setRulingChoice(event.target.value as string)}>
+              {arbitrationSuggestions.map((comment) => (
+                <Radio key={comment.id} value={comment.id}>
+                  <span className="arbitration-option-text"><b>{comment.author}</b>：{comment.suggestion}</span>
+                </Radio>
+              ))}
+              <Radio value="__merge__"><span className="arbitration-option-text">给出合并后的推荐正文</span></Radio>
+            </Radio.Group>
+            {rulingChoice === '__merge__' && (
+              <>
+                <label>合并后的推荐正文</label>
+                <Input.TextArea value={rulingMerged} onChange={(event) => setRulingMerged(event.target.value)} placeholder="综合多条建议，给出作者应采用的最终正文" autoSize={{ minRows: 3, maxRows: 7 }} />
+              </>
+            )}
+            <label>裁决理由（必填）</label>
+            <Input.TextArea value={rulingRationale} onChange={(event) => setRulingRationale(event.target.value)} placeholder="说明为何选择该建议或如此合并，作者与审稿人均可见" autoSize={{ minRows: 2, maxRows: 4 }} />
+          </div>
+        )}
       </Modal>
 
       <Modal title="版本比较" open={versionOpen} onCancel={() => setVersionOpen(false)} footer={null} width={980}>

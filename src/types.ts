@@ -53,8 +53,25 @@ export interface EditConflict {
   detectedAt: number
 }
 
+export type RulingStatus = 'active' | 'stale' | 'resolved'
+
+export interface Ruling {
+  id: string
+  paragraphId: string
+  commentIds: string[]
+  winnerCommentId?: string
+  mergedText?: string
+  rationale: string
+  status: RulingStatus
+  fingerprint: string
+  createdAt: number
+  resolvedAt?: number
+  resolution?: 'accepted' | 'rejected'
+}
+
 export interface HistorySnapshot {
   paragraphs: Paragraph[]
   comments: Comment[]
   versions: Version[]
+  rulings: Ruling[]
 }
